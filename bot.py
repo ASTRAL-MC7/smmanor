@@ -8,6 +8,7 @@ import html
 import json
 import logging
 import os
+import re
 import threading
 import time
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -36,7 +37,7 @@ ADMIN_USERNAME = "neindev"
 
 STAR_RATE = 160        # 1 ⭐ = 160 so'm (100 ⭐ = 16 000 so'm)
 MARKUP_PER_1000 = 5000  # har 1000 taga +5000 so'm
-MIN_STARS = 75
+MIN_STARS = 1   # TEST uchun 1. Ishga tushirishda 75 qiling.
 
 WEBHOOK_BASE = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 WEBHOOK_PATH = "/webhook"
@@ -63,6 +64,14 @@ def fmt(n) -> str:
 
 def esc(s) -> str:
     return html.escape(str(s or ""))
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def clean(s) -> str:
+    """API matnidagi HTML teglarini (<tg-emoji ...>👤</tg-emoji> va h.k.) olib tashlaydi."""
+    return html.unescape(_TAG_RE.sub("", str(s or ""))).strip()
 
 
 def now() -> int:
@@ -356,7 +365,11 @@ async def load_services(force=False):
             except Exception:
                 continue
             s["service"] = sid
-            cname = str(s.get("category") or "Boshqa").strip()
+            s["name"] = clean(s.get("name")) or f"Xizmat {sid}"
+            s["category"] = clean(s.get("category")) or "Boshqa"
+            if s.get("description"):
+                s["description"] = clean(s["description"])
+            cname = s["category"]
             plat = detect_platform(cname)
             if plat == "boshqa":
                 plat = detect_platform(s.get("name", ""))
