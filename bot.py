@@ -29,7 +29,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 # ===================== SOZLAMALAR =====================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-API_KEY = os.environ.get("SMM_API_KEY") or os.environ.get("ANOR_API_KEY", "")
+API_KEY = os.environ.get("SMM_API_KEY", "")
+PROVIDER = "kometa"  # buyurtmalar qaysi panelga tegishli
 API_URL = os.environ.get("SMM_API_URL", "https://kometa-smm.uz/api/v2")
 
 ADMIN_ID = 5523761749
@@ -173,7 +174,11 @@ class DB:
         self.exec("""CREATE TABLE IF NOT EXISTS payments(
             charge_id TEXT PRIMARY KEY, user_id BIGINT, stars BIGINT,
             amount BIGINT, created_at BIGINT)""")
-        self.exec("CREATE TABLE IF NOT EXISTS hidden(service_id BIGINT PRIMARY KEY)")
+        self.exec("CREATE TABLE IF NOT EXISTS hidden_kometa(service_id BIGINT PRIMARY KEY)")
+        try:
+            self.exec("ALTER TABLE orders ADD COLUMN provider TEXT")
+        except Exception:
+            pass  # ustun allaqachon bor
 
     # --- users ---
     def ensure_user(self, uid, username, first_name):
@@ -209,7 +214,7 @@ class DB:
 
     # --- orders ---
     ORDER_COLS = ("id, user_id, api_order, service_id, service_name, link, quantity, charge, "
-                  "status, start_count, remains, refunded, created_at")
+                  "status, start_count, remains, refunded, created_at, provider")
 
     def _order_dict(self, r):
         if not r:
@@ -219,9 +224,9 @@ class DB:
 
     def create_order(self, uid, sid, name, link, qty, charge) -> int:
         r = self.one("""INSERT INTO orders(user_id, service_id, service_name, link, quantity,
-                        charge, status, refunded, created_at)
-                        VALUES(?,?,?,?,?,?,'Pending',0,?) RETURNING id""",
-                     (uid, sid, name, link, qty, charge, now()))
+                        charge, status, refunded, created_at, provider)
+                        VALUES(?,?,?,?,?,?,'Pending',0,?,?) RETURNING id""",
+                     (uid, sid, name, link, qty, charge, now(), PROVIDER))
         return int(r[0])
 
     def update_order(self, oid, **fields):
@@ -247,9 +252,9 @@ class DB:
 
     def active_orders(self, limit=100):
         rows = self.all(f"""SELECT {self.ORDER_COLS} FROM orders
-                            WHERE api_order IS NOT NULL AND status NOT IN
+                            WHERE api_order IS NOT NULL AND provider=? AND status NOT IN
                             ('Completed','Partial','Canceled','Failed','Unknown')
-                            ORDER BY id ASC LIMIT ?""", (limit,))
+                            ORDER BY id ASC LIMIT ?""", (PROVIDER, limit))
         return [self._order_dict(r) for r in rows]
 
     def add_refund(self, oid, target_total) -> int:
@@ -268,13 +273,13 @@ class DB:
 
     # --- hidden ---
     def hidden_ids(self) -> set:
-        return {int(r[0]) for r in self.all("SELECT service_id FROM hidden")}
+        return {int(r[0]) for r in self.all("SELECT service_id FROM hidden_kometa")}
 
     def toggle_hidden(self, sid) -> bool:
-        if self.one("SELECT 1 FROM hidden WHERE service_id=?", (sid,)):
-            self.exec("DELETE FROM hidden WHERE service_id=?", (sid,))
+        if self.one("SELECT 1 FROM hidden_kometa WHERE service_id=?", (sid,)):
+            self.exec("DELETE FROM hidden_kometa WHERE service_id=?", (sid,))
             return False
-        self.exec("INSERT INTO hidden(service_id) VALUES(?) ON CONFLICT DO NOTHING", (sid,))
+        self.exec("INSERT INTO hidden_kometa(service_id) VALUES(?) ON CONFLICT DO NOTHING", (sid,))
         return True
 
 
@@ -532,6 +537,9 @@ async def cmd_check(m: Message, command: CommandObject, bot: Bot):
             f"📊 Bazadagi holat: <code>{esc(o['status'])}</code> · qaytarilgan: {fmt(o['refunded'] or 0)}")
     if not o["api_order"]:
         text += "\n\n❗️ Panel ID yo'q — buyurtma API'ga yetib bormagan yoki javob kelmagan."
+        return await m.answer(text)
+    if o.get("provider") != PROVIDER:
+        text += "\n\nℹ️ Bu eski (Anor) buyurtmasi — Kometa'da tekshirib bo'lmaydi."
         return await m.answer(text)
     try:
         st = await api("status", order=o["api_order"])
@@ -1095,6 +1103,13 @@ async def cb_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
                                kb([[btn("☎️ Admin", url=f"https://t.me/{ADMIN_USERNAME}")], back_main()]))
 
     db.update_order(oid, api_order=int(api_order))
+    try:
+        cost = Decimal(str(res.get("charge"))) if res.get("charge") is not None else None
+        if cost is not None and cost > price:
+            await notify_admin(bot, f"⚠️ Zarar: buyurtma #{oid} — panel {cost} so'm yechdi, "
+                                    f"foydalanuvchi {fmt(price)} so'm to'ladi. Narxlarni tekshiring.")
+    except Exception:
+        pass
     await safe_edit(cb, f"✅ <b>Buyurtma qabul qilindi!</b>\n\n🧾 Buyurtma: #{oid}\n"
                         f"🔹 {esc(s.get('name'))}\n💰 {fmt(price)} so'm yechildi\n"
                         f"💳 Balans: {fmt(db.balance(uid))} so'm",
@@ -1113,7 +1128,7 @@ async def cb_my_orders(cb: CallbackQuery):
                                kb([[btn("🛍 Xizmatlar", "services")], back_main()]))
     rows = []
     for o in db.user_orders(uid, PAGE_SIZE, page * PAGE_SIZE):
-        icon = status_uz(o["status"]).split(" ")[0]
+        icon = STATUS_UZ.get(o["status"], "• x").split(" ")[0]
         rows.append([btn(f"{icon} #{o['id']} · {(o['service_name'] or '')[:32]}", f"ord:{o['id']}")])
     nav = pager("myorders", page, total)
     if nav:
@@ -1135,17 +1150,24 @@ def order_text(o) -> str:
         lines.append(f"⏳ Qolgan: {esc(o['remains'])}")
     if int(o.get("refunded") or 0) > 0:
         lines.append(f"↩️ Qaytarildi: {fmt(o['refunded'])} so'm")
+    if o.get("api_order") and o.get("provider") != PROVIDER:
+        lines.append(f"\nℹ️ Eski buyurtma — holati yangilanmaydi. Savol bo'lsa: @{ADMIN_USERNAME}")
     return "\n".join(lines)
+
+
+def is_live(o) -> bool:
+    """Faqat Kometa'da yaratilgan buyurtmalar API orqali tekshiriladi."""
+    return bool(o and o.get("api_order") and o.get("provider") == PROVIDER)
 
 
 def order_kb(o):
     rows = []
     s = SERVICES.get(int(o["service_id"] or 0), {})
-    if o["api_order"] and o["status"] not in FINAL_STATUSES:
+    if is_live(o) and o["status"] not in FINAL_STATUSES:
         rows.append([btn("🔄 Yangilash", f"ord:{o['id']}")])
         if s.get("cancel"):
             rows.append([btn("🚫 Bekor qilish", f"ocancel:{o['id']}")])
-    if o["api_order"] and o["status"] == "Completed" and s.get("refill"):
+    if is_live(o) and o["status"] == "Completed" and s.get("refill"):
         rows.append([btn("♻️ Qayta tiklash", f"orefill:{o['id']}")])
     rows.append([btn("⬅️ Orqaga", "myorders:0"), btn("🏠 Menyu", "menu")])
     return kb(rows)
@@ -1193,7 +1215,7 @@ async def cb_order_view(cb: CallbackQuery, bot: Bot):
     if not o or o["user_id"] != cb.from_user.id:
         return await cb.answer("Topilmadi", show_alert=True)
     await cb.answer()
-    if o["api_order"] and o["status"] not in FINAL_STATUSES:
+    if is_live(o) and o["status"] not in FINAL_STATUSES:
         try:
             st = await api("status", order=o["api_order"])
             if isinstance(st, dict) and st.get("status"):
@@ -1208,7 +1230,7 @@ async def cb_order_view(cb: CallbackQuery, bot: Bot):
 async def cb_order_refill(cb: CallbackQuery):
     oid = int(cb.data.split(":")[1])
     o = db.get_order(oid)
-    if not o or o["user_id"] != cb.from_user.id or not o["api_order"]:
+    if not o or o["user_id"] != cb.from_user.id or not is_live(o):
         return await cb.answer("Topilmadi", show_alert=True)
     try:
         await api("refill", order=o["api_order"])
@@ -1223,7 +1245,7 @@ async def cb_order_refill(cb: CallbackQuery):
 async def cb_order_cancel(cb: CallbackQuery):
     oid = int(cb.data.split(":")[1])
     o = db.get_order(oid)
-    if not o or o["user_id"] != cb.from_user.id or not o["api_order"]:
+    if not o or o["user_id"] != cb.from_user.id or not is_live(o):
         return await cb.answer("Topilmadi", show_alert=True)
     try:
         await api("cancel", orders=o["api_order"])
