@@ -22,7 +22,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (CallbackQuery, InlineKeyboardButton,
+from aiogram.types import (CallbackQuery, ErrorEvent, InlineKeyboardButton,
                            InlineKeyboardMarkup, LabeledPrice, Message,
                            PreCheckoutQuery)
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -1265,6 +1265,23 @@ async def fallback(m: Message, state: FSMContext):
     await m.answer(welcome_text(m.from_user.id), reply_markup=main_kb())
 
 
+# ===================== XATOLARNI USHLASH =====================
+@router.errors()
+async def on_error(event: ErrorEvent, bot: Bot):
+    log.exception("Handler xatosi: %s", event.exception, exc_info=event.exception)
+    try:
+        upd = event.update
+        who = ""
+        if upd.message and upd.message.from_user:
+            who = f"👤 <code>{upd.message.from_user.id}</code> · {esc((upd.message.text or '')[:60])}"
+        elif upd.callback_query:
+            who = f"👤 <code>{upd.callback_query.from_user.id}</code> · tugma: {esc(upd.callback_query.data)}"
+        await notify_admin(bot, f"🐞 <b>Bot xatosi</b>\n{who}\n<code>{esc(type(event.exception).__name__)}: "
+                                f"{esc(str(event.exception)[:600])}</code>")
+    except Exception:
+        pass
+
+
 # ===================== FON VAZIFALARI =====================
 async def status_poller(bot: Bot):
     await asyncio.sleep(15)
@@ -1313,7 +1330,12 @@ async def on_startup(bot: Bot, dispatcher: Dispatcher):
         url = WEBHOOK_BASE.rstrip("/") + WEBHOOK_PATH
         await bot.set_webhook(url, secret_token=WEBHOOK_SECRET,
                               allowed_updates=dispatcher.resolve_used_update_types())
-        log.info("Webhook o'rnatildi: %s", url)
+        info = await bot.get_webhook_info()
+        log.info("Webhook o'rnatildi: %s | pending=%s | last_error=%s",
+                 info.url, info.pending_update_count, info.last_error_message)
+    me = await bot.get_me()
+    log.info("Bot ishga tushdi: @%s | panel: %s | kalit: %s", me.username, API_URL,
+             "bor" if API_KEY else "YO'Q!")
 
 
 async def on_shutdown(bot: Bot):
@@ -1327,6 +1349,15 @@ def main():
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+
+    @dp.update.outer_middleware()
+    async def log_updates(handler, event, data):
+        u = event.message or event.callback_query
+        if u is not None:
+            text = getattr(u, "text", None) or getattr(u, "data", None)
+            log.info("⬅️ Kelgan: user=%s chat=%s | %s", u.from_user.id if u.from_user else "?",
+                     getattr(getattr(u, "chat", None), "id", "-"), (text or "")[:60])
+        return await handler(event, data)
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
