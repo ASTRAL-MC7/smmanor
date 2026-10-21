@@ -1,5 +1,5 @@
 """
-Nakrutka (SMM) reseller bot — Anor SMM API (anorsmmbot.uz/api/v2)
+Nakrutka (SMM) reseller bot — Kometa SMM API (kometa-smm.uz/api/v2)
 To'lov: Telegram Stars -> ichki balans (so'm). Render web service (webhook).
 """
 import asyncio
@@ -29,8 +29,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 # ===================== SOZLAMALAR =====================
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-API_KEY = os.environ.get("ANOR_API_KEY", "")
-API_URL = os.environ.get("ANOR_API_URL", "https://anorsmmbot.uz/api/v2")
+API_KEY = os.environ.get("SMM_API_KEY") or os.environ.get("ANOR_API_KEY", "")
+API_URL = os.environ.get("SMM_API_URL", "https://kometa-smm.uz/api/v2")
 
 ADMIN_ID = 5523761749
 ADMIN_USERNAME = "neindev"
@@ -518,7 +518,7 @@ async def cmd_orders(m: Message):
 
 @router.message(Command("check"))
 async def cmd_check(m: Message, command: CommandObject, bot: Bot):
-    """/check <bot buyurtma #> — bazadagi holat + Anor'ning xom javobi; holatni qo'llaydi."""
+    """/check <bot buyurtma #> — bazadagi holat + panelning xom javobi; holatni qo'llaydi."""
     if not is_admin(m.from_user.id):
         return
     arg = (command.args or "").strip().lstrip("#")
@@ -527,15 +527,15 @@ async def cmd_check(m: Message, command: CommandObject, bot: Bot):
     o = db.get_order(int(arg))
     if not o:
         return await m.answer("Bunday buyurtma bazada yo'q.")
-    text = (f"🧾 Bot #{o['id']} · Anor ID: <code>{o['api_order'] or '—'}</code>\n"
+    text = (f"🧾 Bot #{o['id']} · Panel ID: <code>{o['api_order'] or '—'}</code>\n"
             f"👤 <code>{o['user_id']}</code> · {fmt(o['charge'])} so'm\n"
             f"📊 Bazadagi holat: <code>{esc(o['status'])}</code> · qaytarilgan: {fmt(o['refunded'] or 0)}")
     if not o["api_order"]:
-        text += "\n\n❗️ Anor ID yo'q — buyurtma API'ga yetib bormagan yoki javob kelmagan."
+        text += "\n\n❗️ Panel ID yo'q — buyurtma API'ga yetib bormagan yoki javob kelmagan."
         return await m.answer(text)
     try:
         st = await api("status", order=o["api_order"])
-        text += f"\n\n📡 Anor javobi:\n<code>{esc(json.dumps(st, ensure_ascii=False)[:1500])}</code>"
+        text += f"\n\n📡 Panel javobi:\n<code>{esc(json.dumps(st, ensure_ascii=False)[:1500])}</code>"
         if isinstance(st, dict) and st.get("status"):
             await apply_status(bot, o, st)
             o = db.get_order(o["id"])
@@ -885,14 +885,16 @@ async def cb_order_start(cb: CallbackQuery, state: FSMContext):
 
 @router.message(OrderSG.link)
 async def msg_link(m: Message, state: FSMContext):
-    link = (m.text or "").strip()
-    if not link or len(link) > 500 or " " in link:
-        return await m.answer("❗️ To'g'ri havola yoki username yuboring.", reply_markup=cancel_kb())
     data = await state.get_data()
     s = SERVICES.get(data.get("sid"))
     if not s:
         await state.clear()
         return await m.answer("⚠️ Xizmat topilmadi, qaytadan tanlang.", reply_markup=main_kb())
+    link = normalize_link(m.text, s)
+    if not link:
+        return await m.answer("❗️ To'g'ri havola yuboring. Masalan:\n"
+                              "<code>https://t.me/kanal/123</code> yoki <code>@kanal</code>",
+                              reply_markup=cancel_kb())
     await state.update_data(link=link)
     if needs_lines(s):
         await state.set_state(OrderSG.comments)
@@ -905,6 +907,32 @@ async def msg_link(m: Message, state: FSMContext):
     await state.set_state(OrderSG.quantity)
     await m.answer(f"🔢 Miqdorni kiriting:\n📉 Min: {fmt(s.get('min', 0))} · 📈 Max: {fmt(s.get('max', 0))}",
                    reply_markup=cancel_kb())
+
+
+_LINK_RE = re.compile(r"^https?://[^\s/]+\.[^\s]+$", re.I)
+
+
+def normalize_link(text, s) -> str | None:
+    """Kometa faqat to'liq https:// havola qabul qiladi — username va qisqa havolalarni to'g'irlaydi."""
+    link = (text or "").strip()
+    if not link or len(link) > 480 or any(c.isspace() for c in link):
+        return None
+    if link.startswith("@") and len(link) > 1:
+        user = link[1:]
+        plat = detect_platform(f"{s.get('category', '')} {s.get('name', '')}")
+        if plat == "instagram":
+            link = f"https://instagram.com/{user}"
+        elif plat == "tiktok":
+            link = f"https://www.tiktok.com/@{user}"
+        elif plat == "youtube":
+            link = f"https://www.youtube.com/@{user}"
+        else:
+            link = f"https://t.me/{user}"
+    elif link.lower().startswith("http://"):
+        link = "https://" + link[7:]
+    elif not link.lower().startswith("https://"):
+        link = "https://" + link
+    return link if _LINK_RE.match(link) else None
 
 
 def _int(text):
@@ -1059,7 +1087,7 @@ async def cb_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
                                kb([[btn("☎️ Admin", url=f"https://t.me/{ADMIN_USERNAME}")], back_main()]))
     except ApiNetError as e:
         db.update_order(oid, status="Unknown")
-        await notify_admin(bot, f"❓ <b>Javob noma'lum</b> (buyurtma #{oid}) — Anor panelda tekshiring!\n"
+        await notify_admin(bot, f"❓ <b>Javob noma'lum</b> (buyurtma #{oid}) — kometa-smm panelda tekshiring!\n"
                                 f"👤 <code>{uid}</code> {esc(uname)}\n🔹 {esc(s.get('name'))}\n"
                                 f"🔗 {esc(data['link'])} · {fmt(data['total'])} ta · {fmt(price)} so'm\n❗️ {esc(e)}")
         return await safe_edit(cb, f"⚠️ Buyurtma holati aniqlanmadi. Admin tekshirib chiqadi.\n"
@@ -1198,7 +1226,7 @@ async def cb_order_cancel(cb: CallbackQuery):
     if not o or o["user_id"] != cb.from_user.id or not o["api_order"]:
         return await cb.answer("Topilmadi", show_alert=True)
     try:
-        await api("cancel", order=o["api_order"])
+        await api("cancel", orders=o["api_order"])
         await cb.answer("🚫 Bekor qilish so'rovi yuborildi. Bekor qilinsa pul balansga qaytadi.", show_alert=True)
     except ApiError as e:
         await cb.answer(f"❗️ {str(e)[:150]}", show_alert=True)
@@ -1256,7 +1284,7 @@ async def on_startup(bot: Bot, dispatcher: Dispatcher):
     db = DB()
     http = aiohttp.ClientSession()
     if not API_KEY:
-        log.error("ANOR_API_KEY o'rnatilmagan!")
+        log.error("SMM_API_KEY o'rnatilmagan!")
     _bg_tasks.append(asyncio.create_task(services_refresher()))
     _bg_tasks.append(asyncio.create_task(status_poller(bot)))
     if WEBHOOK_BASE:
