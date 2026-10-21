@@ -79,19 +79,19 @@ def now() -> int:
 
 
 def norm_status(s: str) -> str:
-    s = (s or "").strip()
+    s = str(s or "").strip()
     low = s.lower()
-    if low in ("cancelled", "canceled", "cancel"):
+    if any(w in low for w in ("cancel", "bekor", "отмен", "refund", "qaytar")):
         return "Canceled"
-    if low == "partial":
+    if any(w in low for w in ("partial", "qisman", "частич")):
         return "Partial"
-    if low == "completed":
+    if any(w in low for w in ("complet", "bajarildi", "tugad", "выполнен", "success")):
         return "Completed"
-    if low in ("in progress", "inprogress"):
+    if any(w in low for w in ("progress", "bajarilmoqda", "jarayon", "выполня")):
         return "In progress"
-    if low == "processing":
+    if "process" in low:
         return "Processing"
-    if low == "pending":
+    if any(w in low for w in ("pending", "kutil", "ожида")):
         return "Pending"
     return s or "Pending"
 
@@ -514,6 +514,36 @@ async def cmd_orders(m: Message):
                      f"   {esc((o['service_name'] or '')[:45])} · {fmt(o['quantity'])} ta · "
                      f"{fmt(o['charge'])} so'm · {status_uz(o['status'])}")
     await m.answer("\n".join(lines), disable_web_page_preview=True)
+
+
+@router.message(Command("check"))
+async def cmd_check(m: Message, command: CommandObject, bot: Bot):
+    """/check <bot buyurtma #> — bazadagi holat + Anor'ning xom javobi; holatni qo'llaydi."""
+    if not is_admin(m.from_user.id):
+        return
+    arg = (command.args or "").strip().lstrip("#")
+    if not arg.isdigit():
+        return await m.answer("Foydalanish: <code>/check &lt;bot buyurtma raqami&gt;</code>\nMasalan: <code>/check 3</code>")
+    o = db.get_order(int(arg))
+    if not o:
+        return await m.answer("Bunday buyurtma bazada yo'q.")
+    text = (f"🧾 Bot #{o['id']} · Anor ID: <code>{o['api_order'] or '—'}</code>\n"
+            f"👤 <code>{o['user_id']}</code> · {fmt(o['charge'])} so'm\n"
+            f"📊 Bazadagi holat: <code>{esc(o['status'])}</code> · qaytarilgan: {fmt(o['refunded'] or 0)}")
+    if not o["api_order"]:
+        text += "\n\n❗️ Anor ID yo'q — buyurtma API'ga yetib bormagan yoki javob kelmagan."
+        return await m.answer(text)
+    try:
+        st = await api("status", order=o["api_order"])
+        text += f"\n\n📡 Anor javobi:\n<code>{esc(json.dumps(st, ensure_ascii=False)[:1500])}</code>"
+        if isinstance(st, dict) and st.get("status"):
+            await apply_status(bot, o, st)
+            o = db.get_order(o["id"])
+            text += (f"\n\n✅ Yangilandi: <code>{esc(o['status'])}</code> · "
+                     f"qaytarilgan: {fmt(o['refunded'] or 0)} so'm")
+    except Exception as e:
+        text += f"\n\n❗️ API xato: <code>{esc(e)}</code>"
+    await m.answer(text)
 
 
 @router.message(Command("usercount"))
@@ -1187,8 +1217,8 @@ async def fallback(m: Message, state: FSMContext):
 
 # ===================== FON VAZIFALARI =====================
 async def status_poller(bot: Bot):
+    await asyncio.sleep(15)
     while True:
-        await asyncio.sleep(POLL_INTERVAL)
         try:
             orders = db.active_orders(100)
             if not orders:
@@ -1206,6 +1236,7 @@ async def status_poller(bot: Bot):
             log.warning("Poller API xatosi: %s", e)
         except Exception:
             log.exception("Poller xatosi")
+        await asyncio.sleep(POLL_INTERVAL)
 
 
 async def services_refresher():
